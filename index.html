@@ -288,6 +288,7 @@
                 this.currentTest = null;
                 this.takerId = "";
                 this.takerName = "";
+                this.takerPhone = "";
                 
                 // متغيرات التنقل سؤال بسؤال
                 this.flatQuestions = [];
@@ -304,11 +305,19 @@
             }
 
             initData() {
-                // استخدام النسخة المعتمدة v20
-                const data = localStorage.getItem('school_measurement_data_v20');
-                if(data) {
-                    this.allTests = JSON.parse(data);
-                }
+                // الربط المباشر بقاعدة بيانات Firebase لجلب الاختبارات المنشورة
+                database.ref('school_measurement_data_v20').on('value', snap => {
+                    if (snap.exists()) {
+                        let data = snap.val();
+                        this.allTests = Array.isArray(data) ? data : Object.values(data);
+                        // تحديث واجهة القائمة في حال كان الطالب قد سجل دخوله بالفعل
+                        if (this.takerId && !document.getElementById('tests-box').classList.contains('hidden')) {
+                            this.renderProgramsList();
+                        }
+                    } else {
+                        this.allTests = [];
+                    }
+                });
             }
 
             loginAndFetchTests(event) {
@@ -333,7 +342,7 @@
                     if (snap.exists()) {
                         const data = snap.val();
                         const key = Object.keys(data)[0];
-                        this.processLogin(key, data[key].studentName);
+                        this.processLogin(key, data[key].studentName, data[key].studentPhone);
                     } else {
                         // البحث في عقدة المعلمين
                         return database.ref('assignments').orderByChild('teacherUser').equalTo(username).once('value');
@@ -343,7 +352,7 @@
                     if (snap && snap.exists()) {
                         const data = snap.val();
                         const key = Object.keys(data)[0];
-                        this.processLogin(key, data[key].teacherName);
+                        this.processLogin(key, data[key].teacherName, data[key].teacherPhone);
                     } else if (snap && !snap.exists()) {
                         errorEl.textContent = "اسم المستخدم غير صحيح أو غير مسجل في النظام.";
                         errorEl.classList.remove('hidden');
@@ -360,9 +369,10 @@
                 });
             }
 
-            processLogin(id, name) {
+            processLogin(id, name, phone) {
                 this.takerId = id;
                 this.takerName = name;
+                this.takerPhone = phone || "0500000000"; // الاحتفاظ برقم الجوال لإضافته لاحقاً في التقرير
                 
                 document.getElementById('login-box').classList.add('hidden');
                 document.getElementById('welcome-name').textContent = `مرحباً بك: ${name}`;
@@ -374,6 +384,7 @@
             logout() {
                 this.takerId = "";
                 this.takerName = "";
+                this.takerPhone = "";
                 document.getElementById('taker-username').value = "";
                 document.getElementById('tests-box').classList.add('hidden');
                 document.getElementById('login-box').classList.remove('hidden');
@@ -386,11 +397,12 @@
 
                 // تصفية الصلاحيات بحيث يظهر فقط الاختبارات والاستبانات (تجاهل البرامج التدريبية المخصصة كـ edu_task)
                 const userTests = this.allTests.filter(test => {
+                    if(!test) return false;
                     const isActive = test.status !== 'closed';
                     const hasPermission = test.permissions && test.permissions.selectedIds && test.permissions.selectedIds.includes(this.takerId);
                     
                     // استبعاد لوحات الشرح (البرامج التدريبية) إذا كانت نوعها edu_task
-                    const isTestOrSurvey = test.type === 'test' || test.type === 'survey' || !test.type;
+                    const isTestOrSurvey = test.type === 'test' || test.type === 'survey' || test.type === 'questionnaire' || !test.type;
                     
                     return isActive && hasPermission && isTestOrSurvey;
                 });
@@ -401,7 +413,7 @@
                 }
 
                 userTests.forEach(test => {
-                    const studentResult = (test.results || []).find(r => r.studentName === this.takerName);
+                    const studentResult = (test.results || []).find(r => r.studentId === this.takerId || r.studentName === this.takerName);
                     const isCompleted = !!studentResult;
                     
                     const totalWeight = test.targetWeight || test.totalWeight || 100;
@@ -409,7 +421,9 @@
                     const completionPercentage = isCompleted ? Math.min(100, Math.round((earnedScore / totalWeight) * 100)) : 0;
                     
                     let qCount = 0;
-                    test.standardsSections.forEach(s => qCount += s.questions.length);
+                    if(test.standardsSections) {
+                        test.standardsSections.forEach(s => qCount += (s.questions ? s.questions.length : 0));
+                    }
 
                     const badgeText = test.type === 'test' || !test.type ? 'اختبار مقنن' : 'استبانة / مقياس';
                     const icon = test.type === 'test' || !test.type ? 'fa-file-signature' : 'fa-clipboard-list';
@@ -478,6 +492,26 @@
                 document.getElementById(viewId).classList.remove('hidden');
                 window.scrollTo({ top: 0, behavior: 'smooth' });
             }
+            
+            // دالة تقوم بتسجيل أن الطالب قد اطلع على الاختبار ليعكس ذلك في لوحة الإدارة
+            markTestAsViewed(testId) {
+                database.ref('school_measurement_data_v20').once('value').then(snap => {
+                    let data = snap.val();
+                    if(!data) return;
+                    data = Array.isArray(data) ? data : Object.values(data);
+                    
+                    const testIndex = data.findIndex(t => t.id === testId);
+                    if(testIndex !== -1 && this.takerId) {
+                        if(!data[testIndex].viewedBy) data[testIndex].viewedBy = {};
+                        
+                        // تسجيل الاطلاع إذا لم يكن مسجلاً مسبقاً
+                        if(!data[testIndex].viewedBy[this.takerId]) {
+                            data[testIndex].viewedBy[this.takerId] = true;
+                            database.ref('school_measurement_data_v20').set(data);
+                        }
+                    }
+                });
+            }
 
             startTestIntro(testId) {
                 if(!this.takerId) { alert("الرجاء تسجيل الدخول أولاً."); return; }
@@ -485,6 +519,9 @@
 
                 this.currentTest = this.allTests.find(t => t.id == testId);
                 if(!this.currentTest) return;
+                
+                // تسجيل الاطلاع (View Tracking) بمجرد فتح مقدمة الاختبار
+                this.markTestAsViewed(testId);
 
                 document.getElementById('intro-badge').textContent = this.currentTest.type === 'test' || !this.currentTest.type ? 'اختبار تخصصي مقنن' : 'استبانة / مقياس رضا';
                 document.getElementById('intro-title').textContent = this.currentTest.title;
@@ -494,16 +531,20 @@
                 
                 // تجميع الأسئلة في مصفوفة مسطحة للتنقل بينها
                 this.flatQuestions = [];
-                this.currentTest.standardsSections.forEach((section, sIdx) => {
-                    section.questions.forEach((q, qIdx) => {
-                        this.flatQuestions.push({
-                            sectionTitle: section.standardTitle,
-                            sIdx: sIdx,
-                            qIdx: qIdx,
-                            data: q
-                        });
+                if(this.currentTest.standardsSections) {
+                    this.currentTest.standardsSections.forEach((section, sIdx) => {
+                        if(section.questions) {
+                            section.questions.forEach((q, qIdx) => {
+                                this.flatQuestions.push({
+                                    sectionTitle: section.standardTitle,
+                                    sIdx: sIdx,
+                                    qIdx: qIdx,
+                                    data: q
+                                });
+                            });
+                        }
                     });
-                });
+                }
                 
                 this.totalQuestions = this.flatQuestions.length;
                 document.getElementById('intro-q-count').textContent = this.totalQuestions;
@@ -801,26 +842,30 @@
                 let totalScore = this.currentTest.totalWeight || this.currentTest.targetWeight || 100;
                 let standardScores = {};
 
-                this.currentTest.standardsSections.forEach((sec, sIdx) => {
-                    let secScore = 0;
-                    sec.questions.forEach((q, qIdx) => {
-                        const qId = `q_${sIdx}_${qIdx}`;
-                        const userAnswer = this.userAnswers[qId];
-                        
-                        if (userAnswer) {
-                            if (this.currentTest.type === 'test' || !this.currentTest.type) {
-                                if (userAnswer === q.correctAnswer) {
-                                    achievedScore += q.questionWeight;
-                                    secScore += q.questionWeight;
+                if(this.currentTest.standardsSections) {
+                    this.currentTest.standardsSections.forEach((sec, sIdx) => {
+                        let secScore = 0;
+                        if(sec.questions) {
+                            sec.questions.forEach((q, qIdx) => {
+                                const qId = `q_${sIdx}_${qIdx}`;
+                                const userAnswer = this.userAnswers[qId];
+                                
+                                if (userAnswer) {
+                                    if (this.currentTest.type === 'test' || !this.currentTest.type) {
+                                        if (userAnswer === q.correctAnswer) {
+                                            achievedScore += q.questionWeight;
+                                            secScore += q.questionWeight;
+                                        }
+                                    } else {
+                                        achievedScore += q.questionWeight;
+                                        secScore += q.questionWeight;
+                                    }
                                 }
-                            } else {
-                                achievedScore += q.questionWeight;
-                                secScore += q.questionWeight;
-                            }
+                            });
                         }
+                        standardScores[sec.standardTitle] = secScore;
                     });
-                    standardScores[sec.standardTitle] = secScore;
-                });
+                }
 
                 if (this.currentTest.type === 'test' || !this.currentTest.type) {
                     document.getElementById('score-card').classList.remove('hidden');
@@ -836,28 +881,37 @@
             }
 
             saveResultToDB(achievedScore, standardScores) {
-                const data = JSON.parse(localStorage.getItem('school_measurement_data_v20') || '[]');
-                const testIndex = data.findIndex(t => t.id === this.currentTest.id);
-                
-                if(testIndex !== -1) {
-                    if(!data[testIndex].results) data[testIndex].results = [];
+                // جلب النسخة الأحدث من قاعدة البيانات لتحديثها بالنتائج
+                database.ref('school_measurement_data_v20').once('value').then(snap => {
+                    let data = snap.val() || [];
+                    const testIndex = data.findIndex(t => t.id === this.currentTest.id);
                     
-                    const resultObj = {
-                        studentName: this.takerName,
-                        totalScore: achievedScore,
-                        standardScores: standardScores,
-                        date: new Date().toISOString()
-                    };
-                    
-                    const existingIdx = data[testIndex].results.findIndex(r => r.studentName === this.takerName);
-                    if(existingIdx !== -1) {
-                        data[testIndex].results[existingIdx] = resultObj;
-                    } else {
-                        data[testIndex].results.push(resultObj);
+                    if(testIndex !== -1) {
+                        if(!data[testIndex].results) data[testIndex].results = [];
+                        
+                        const resultObj = {
+                            studentId: this.takerId, // إضافة الـ ID لضمان التوافق التام مع لوحة الإدارة
+                            studentName: this.takerName,
+                            studentPhone: this.takerPhone, 
+                            totalScore: achievedScore,
+                            standardScores: standardScores,
+                            date: new Date().toISOString()
+                        };
+                        
+                        // التحديث إذا كان الطالب قد أرسل النتيجة مسبقاً
+                        const existingIdx = data[testIndex].results.findIndex(r => r.studentId === this.takerId || r.studentName === this.takerName);
+                        if(existingIdx !== -1) {
+                            data[testIndex].results[existingIdx] = resultObj;
+                        } else {
+                            data[testIndex].results.push(resultObj);
+                        }
+                        
+                        // حفظ المصفوفة المحدثة في قاعدة البيانات
+                        database.ref('school_measurement_data_v20').set(data).then(() => {
+                            console.log('تم حفظ وتسجيل النتيجة في قاعدة البيانات بنجاح.');
+                        });
                     }
-                    
-                    localStorage.setItem('school_measurement_data_v20', JSON.stringify(data));
-                }
+                });
             }
         }
 
